@@ -1,6 +1,6 @@
 package compress
 
-type Type uint8
+type Type uint16
 
 type Compressor interface {
 	Zip(data []byte) ([]byte, error)
@@ -13,6 +13,8 @@ const (
 	Gzip
 )
 
-var Compressors = map[Type]func() Compressor{
-	Invalid: func() Compressor { return nil },
+var Compressors = map[Type]Compressor{
+	Invalid: nil,
+	Raw:     &RawCompressor{},
+	Gzip:    &GzipCompressor{},
 }
