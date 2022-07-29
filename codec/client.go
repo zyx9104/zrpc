@@ -24,16 +24,17 @@ type ClientCodec struct {
 	pending map[uint64]string
 }
 
-func NewClientCodec(conn io.ReadWriteCloser, s serialize.Serializer) *ClientCodec {
+func NewClientCodec(conn io.ReadWriteCloser, s serialize.Serializer, ct compress.Type) *ClientCodec {
 
 	return &ClientCodec{
-		r:       bufio.NewReader(conn),
-		w:       bufio.NewWriter(conn),
-		c:       conn,
-		s:       s,
-		resp:    header.GetResponse(),
-		mtx:     sync.Mutex{},
-		pending: make(map[uint64]string),
+		r:            bufio.NewReader(conn),
+		w:            bufio.NewWriter(conn),
+		c:            conn,
+		s:            s,
+		CompressType: ct,
+		resp:         header.GetResponse(),
+		mtx:          sync.Mutex{},
+		pending:      make(map[uint64]string),
 	}
 }
 
