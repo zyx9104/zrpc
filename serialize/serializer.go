@@ -14,6 +14,9 @@ const (
 	Proto
 )
 
-var Serializers = map[Type]func() Serializer{
-	Json: func() Serializer { return &JsonSerializer{} },
+var Serializers = map[Type]Serializer{
+	Invalid: nil,
+	Gob:     nil,
+	Json:    &JsonSerializer{},
+	Proto:   nil,
 }

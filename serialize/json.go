@@ -1,11 +1,13 @@
 package serialize
 
+import "encoding/json"
+
 type JsonSerializer struct {
 }
 
-func (s *JsonSerializer) Marshal(body interface{}) ([]byte, error) {
-	return nil, nil
+func (JsonSerializer) Marshal(body interface{}) ([]byte, error) {
+	return json.Marshal(body)
 }
-func (s *JsonSerializer) Unmarshal(data []byte, body interface{}) error {
-	return nil
+func (JsonSerializer) Unmarshal(data []byte, body interface{}) error {
+	return json.Unmarshal(data, body)
 }
