@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"net"
 	"net/rpc"
 	"sync"
 
@@ -28,7 +27,7 @@ type ServerCodec struct {
 	pending map[uint64]*ctx
 }
 
-func NewServerCodec(conn net.Conn, s serialize.Serializer) *ServerCodec {
+func NewServerCodec(conn io.ReadWriteCloser, s serialize.Serializer) *ServerCodec {
 	return &ServerCodec{
 		r:       bufio.NewReader(conn),
 		w:       bufio.NewWriter(conn),
@@ -58,6 +57,16 @@ func (cc *ServerCodec) ReadRequestHeader(req *rpc.Request) error {
 }
 
 func (cc *ServerCodec) ReadRequestBody(body interface{}) error {
+
+	if body == nil {
+		if cc.req.RequestLen != 0 {
+			if _, err := cc.r.Read(make([]byte, cc.req.RequestLen)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	data := make([]byte, cc.req.RequestLen)
 	n, err := cc.r.Read(data)
 	if err != nil {
