@@ -31,7 +31,7 @@ func (req *RequestHeader) Read(rd *bufio.Reader) error {
 		return err
 	}
 	if n != len(data) {
-		return fmt.Errorf("read %v bytes, have %v byte", n, len(data))
+		return fmt.Errorf("RequestHeader.Read error: read %v bytes, should %v byte", n, len(data))
 	}
 
 	req.CompressType = compress.Type(binary.BigEndian.Uint16(data[2:]))
@@ -49,7 +49,7 @@ func (req *RequestHeader) Write(wt *bufio.Writer) error {
 	binary.BigEndian.PutUint64(data[8:], req.Seq)
 	n := copy(data[16:], req.ServiceMethod)
 	if n != int(req.MethodLen) {
-		return fmt.Errorf("write %v bytes, have %v byte", n, req.MethodLen)
+		return fmt.Errorf("RequestHeader.write error: write %v bytes, should %v byte", n, req.MethodLen)
 	}
 	wt.Write(data)
 	return wt.Flush()
@@ -76,7 +76,7 @@ func (resp *ResponseHeader) Read(rd *bufio.Reader) error {
 		return err
 	}
 	if n != len(data) {
-		return fmt.Errorf("read %v bytes, have %v byte", n, len(data))
+		return fmt.Errorf("ResponseHeader.Read error: read %v bytes, should %v byte", n, len(data))
 	}
 
 	resp.CompressType = compress.Type(binary.BigEndian.Uint16(data[2:]))
@@ -94,7 +94,7 @@ func (resp *ResponseHeader) Write(wt *bufio.Writer) error {
 	binary.BigEndian.PutUint64(data[8:], resp.Seq)
 	n := copy(data[16:], resp.Error)
 	if n != int(resp.ErrorLen) {
-		return fmt.Errorf("write %v bytes, have %v byte", n, resp.ErrorLen)
+		return fmt.Errorf("ResponseHeader.write error: write %v bytes, should %v byte", n, resp.ErrorLen)
 	}
 	wt.Write(data)
 	return wt.Flush()
