@@ -2,6 +2,8 @@ package zrpc
 
 import (
 	"encoding/json"
+	"errors"
+	"go/token"
 	"io"
 	"log"
 	"net"
@@ -14,12 +16,14 @@ import (
 )
 
 type Server struct {
-	services sync.Map
+	serviceMap sync.Map
 }
 
 type service struct {
-	Name   string
-	Method map[string]*methodType
+	name   string
+	typ    reflect.Type
+	rcv    reflect.Value
+	method map[string]*methodType
 }
 
 type methodType struct {
@@ -110,4 +114,111 @@ func (server *Server) call(codec codec.ServerCodec, req *header.Request, body in
 	codec.WriteResponse(&header.Response{Seq: req.Seq, ServiceMethod: req.ServiceMethod}, &req.ServiceMethod)
 
 	header.FreeRequest(req)
+}
+
+/*
+服务注册
+*/
+
+func (server *Server) Register(rcvr interface{}) {
+	server.register(rcvr, "", false)
+}
+
+func (server *Server) RegisterName(rcvr interface{}, name string) {
+	server.register(rcvr, name, true)
+}
+
+func (server *Server) register(rcvr interface{}, name string, username bool) error {
+	s := new(service)
+	s.typ = reflect.TypeOf(rcvr)
+	s.rcv = reflect.ValueOf(rcvr)
+	sname := reflect.Indirect(s.rcv).Type().Name()
+	if username {
+		sname = name
+	}
+
+	if sname == "" {
+		s := "zrpc.Register: no service name for type " + s.typ.String()
+		log.Print(s)
+		return errors.New(s)
+	}
+	if !token.IsExported(sname) && !username {
+		s := "zrpc.Register: service " + sname + " must be exported"
+		log.Print(s)
+		return errors.New(s)
+	}
+	s.name = sname
+	s.method = getMethods(s.typ)
+	if len(s.method) == 0 {
+		str := ""
+		method := getMethods(reflect.PointerTo(s.typ))
+		if len(method) != 0 {
+			str = "zrpc.Register: type " + sname + " has no exported methods of suitable type (hint: pass a pointer to value of that type)"
+		} else {
+			str = "zrpc.Register: type " + sname + " has no exported methods of suitable type"
+		}
+		log.Print(str)
+		return errors.New(str)
+	}
+	if _, dup := server.serviceMap.LoadOrStore(sname, s); dup {
+		return errors.New("zrpc: service already defined: " + sname)
+	}
+	return nil
+}
+
+func isExportedOrBuiltIn(typ reflect.Type) bool {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	return token.IsExported(typ.Name()) || typ.PkgPath() == ""
+
+}
+
+func getMethods(svc reflect.Type) map[string]*methodType {
+	methods := make(map[string]*methodType)
+	for i := 0; i < svc.NumMethod(); i++ {
+		method := svc.Method(i)
+		//方法必须是导出的
+		if !method.IsExported() {
+			continue
+		}
+		mtype := method.Type
+		mname := method.Name
+		//必须为三个参数(rcvr)f(argv,reply)
+		if mtype.NumIn() != 3 {
+			continue
+		}
+
+		argv := mtype.In(1)
+		//Argv 必须是导出的
+		if isExportedOrBuiltIn(argv) {
+			continue
+		}
+
+		reply := mtype.In(2)
+		//reply 必须为指针
+		if reply.Kind() != reflect.Pointer {
+			continue
+		}
+		//reply 必须是导出的
+		if isExportedOrBuiltIn(reply) {
+			continue
+		}
+		//返回值数量为1
+		if mtype.NumOut() != 1 {
+			continue
+		}
+
+		//返回值类型必须为error
+		if mtype.Out(0) != reflect.TypeOf((*error)(nil)).Elem() {
+			continue
+		}
+
+		methods[mname] = &methodType{
+			method:    method,
+			ArgType:   argv,
+			ReplyType: reply,
+		}
+	}
+	return methods
 }
