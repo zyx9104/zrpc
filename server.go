@@ -3,11 +3,13 @@ package zrpc
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/token"
 	"io"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/z-y-x233/zrpc/codec"
@@ -71,48 +73,105 @@ func (server *Server) ServeCodec(codec codec.ServerCodec) {
 	sending := &sync.Mutex{}
 	wg := &sync.WaitGroup{}
 	for {
-		req, body, err := server.ReadRequest(codec)
+		s, mtype, req, args, reply, err := server.ReadRequest(codec)
 		if err != nil {
 			log.Print(err)
+			server.SendResponse(codec, req, struct{}{}, sending, err.Error())
+			header.FreeRequest(req)
 			break
 		}
 		wg.Add(1)
-		go server.call(codec, req, body, sending, wg)
+		go s.call(server, sending, wg, mtype, req, args, reply, codec)
 	}
 	wg.Wait()
 
 }
 
-func (server *Server) ReadRequest(codec codec.ServerCodec) (req *header.Request, body string, err error) {
-	req, err = server.ReadRequestHeader(codec)
+func (server *Server) ReadRequest(codec codec.ServerCodec) (s *service, mtype *methodType, req *header.Request, args, reply reflect.Value, err error) {
+	s, mtype, req, err = server.ReadRequestHeader(codec)
+
 	if err != nil {
-		log.Print("Server.ReadRequest ", err)
+		codec.ReadRequestBody(nil)
 		return
 	}
-	var s string
-	codec.ReadRequestBody(&s)
-	return req, s, err
-}
 
-func (server *Server) ReadRequestHeader(codec codec.ServerCodec) (*header.Request, error) {
-	req := header.GetRequest()
-	err := codec.ReadRequestHeader(req)
-	if err != nil {
-		return nil, err
+	if mtype.ArgType.Kind() == reflect.Pointer {
+		args = reflect.New(mtype.ArgType.Elem())
+	} else {
+		args = reflect.New(mtype.ArgType)
 	}
-	return req, nil
+
+	if err = codec.ReadRequestBody(args.Interface()); err != nil {
+		return
+	}
+
+	if mtype.ArgType.Kind() != reflect.Pointer {
+		args = args.Elem()
+	}
+
+	reply = reflect.New(mtype.ReplyType.Elem())
+	switch mtype.ReplyType.Elem().Kind() {
+	case reflect.Map:
+		reply.Elem().Set(reflect.MakeMap(mtype.ReplyType.Elem()))
+	case reflect.Slice:
+		reply.Elem().Set(reflect.MakeSlice(mtype.ReplyType.Elem(), 0, 0))
+	}
+	return
 }
 
-func (server *Server) SendResponse(resp *header.Response, reply string) {
+func (server *Server) ReadRequestHeader(codec codec.ServerCodec) (s *service, mtype *methodType, req *header.Request, err error) {
+	req = header.GetRequest()
+	err = codec.ReadRequestHeader(req)
+	if err != nil {
+		return
+	}
+	dot := strings.LastIndex(req.ServiceMethod, ".")
+	serviceName := req.ServiceMethod[:dot]
+	methodName := req.ServiceMethod[dot+1:]
 
+	svic, ok := server.serviceMap.Load(serviceName)
+	if !ok {
+		err = fmt.Errorf("not found service %s", serviceName)
+		return
+	}
+	s = svic.(*service)
+	mtype, ok = s.method[methodName]
+	if !ok {
+		err = fmt.Errorf("service %s not found method %s", serviceName, methodName)
+		return
+	}
+	return
 }
 
-func (server *Server) call(codec codec.ServerCodec, req *header.Request, body interface{}, sending *sync.Mutex, wg *sync.WaitGroup) {
-	defer wg.Done()
-	log.Printf("rpc server read method: %v, seq: %v, args: %v", req.ServiceMethod, req.Seq, body)
+func (server *Server) SendResponse(codec codec.ServerCodec, req *header.Request, reply interface{}, sending *sync.Mutex, errmsg string) error {
+	resp := header.GetResponse()
+	resp.ServiceMethod = req.ServiceMethod
+	resp.Seq = req.Seq
+	resp.Error = errmsg
 
-	codec.WriteResponse(&header.Response{Seq: req.Seq, ServiceMethod: req.ServiceMethod}, &req.ServiceMethod)
+	sending.Lock()
+	defer sending.Unlock()
+	return codec.WriteResponse(resp, reply)
+}
 
+func (s *service) call(server *Server, sending *sync.Mutex, wg *sync.WaitGroup, mtype *methodType, req *header.Request, args, reply reflect.Value, codec codec.ServerCodec) {
+	if wg != nil {
+		defer wg.Done()
+	}
+	mtype.Lock()
+	mtype.numCalls++
+	mtype.Unlock()
+	fun := mtype.method.Func
+
+	Param := []reflect.Value{s.rcv, args, reply}
+	returnVal := fun.Call(Param)
+
+	errInter := returnVal[0].Interface()
+	errmsg := ""
+	if errInter != nil {
+		errmsg = errInter.(error).Error()
+	}
+	server.SendResponse(codec, req, reply.Interface(), sending, errmsg)
 	header.FreeRequest(req)
 }
 
@@ -186,31 +245,41 @@ func getMethods(svc reflect.Type) map[string]*methodType {
 		mname := method.Name
 		//必须为三个参数(rcvr)f(argv,reply)
 		if mtype.NumIn() != 3 {
+			log.Printf("zrpc.Register: method %q has %d input parameters; needs exactly three\n", mname, mtype.NumIn())
+
 			continue
 		}
 
 		argv := mtype.In(1)
 		//Argv 必须是导出的
-		if isExportedOrBuiltIn(argv) {
+		if !isExportedOrBuiltIn(argv) {
+			log.Printf("zrpc.Register: method %q, req type %q is not exported\n", mname, argv)
+
 			continue
 		}
 
 		reply := mtype.In(2)
 		//reply 必须为指针
 		if reply.Kind() != reflect.Pointer {
+			log.Printf("zrpc.Register: method %q reply type %q must be pointer\n", mname, reply)
+
 			continue
 		}
 		//reply 必须是导出的
-		if isExportedOrBuiltIn(reply) {
+		if !isExportedOrBuiltIn(reply) {
+			log.Printf("zrpc.Register: method %q, reply type %q is not exported\n", mname, reply)
+
 			continue
 		}
 		//返回值数量为1
 		if mtype.NumOut() != 1 {
+			log.Printf("zrpc.Register: method %q has %d output parameters; needs exactly one\n", mname, mtype.NumOut())
 			continue
 		}
 
 		//返回值类型必须为error
 		if mtype.Out(0) != reflect.TypeOf((*error)(nil)).Elem() {
+			log.Printf("rpc.Register: return type of method %q is %q, must be error\n", mname, mtype.Out(0))
 			continue
 		}
 
