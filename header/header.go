@@ -8,9 +8,9 @@ type Request struct {
 }
 
 type Response struct {
+	Seq           uint64
 	ServiceMethod string
 	Error         string
-	Seq           uint64
 }
 
 var (
