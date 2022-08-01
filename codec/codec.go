@@ -1,17 +1,38 @@
 package codec
 
-import "github.com/z-y-x233/zrpc/header"
+import (
+	"io"
+
+	"github.com/z-y-x233/zrpc/header"
+)
+
+type Type uint8
 
 type ClientCodec interface {
-	ReadResponseHead(response *header.Response) error
+	ReadResponseHeader(response *header.Response) error
 	ReadResponseBody(body interface{}) error
 	WriteRequest(request *header.Request, body interface{}) error
 	Close() error
 }
 
 type ServerCodec interface {
-	ReadResponseHead(request *header.Request) error
+	ReadRequestHeader(request *header.Request) error
 	ReadRequestBody(body interface{}) error
 	WriteResponse(response *header.Response, body interface{}) error
 	Close() error
+}
+
+const (
+	Invalid Type = iota
+	Gob
+)
+
+var ServerCodecs = map[Type]func(io.ReadWriteCloser) ServerCodec{
+	Invalid: nil,
+	Gob:     NewGobServerCodec,
+}
+
+var ClientCodecs = map[Type]func(io.ReadWriteCloser) ClientCodec{
+	Invalid: nil,
+	Gob:     NewGobClientCodec,
 }

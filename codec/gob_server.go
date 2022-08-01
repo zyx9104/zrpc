@@ -3,9 +3,10 @@ package codec
 import (
 	"bufio"
 	"encoding/gob"
-	"github.com/z-y-x233/zrpc/header"
 	"io"
 	"log"
+
+	"github.com/z-y-x233/zrpc/header"
 )
 
 type GobServerCodec struct {
@@ -16,7 +17,17 @@ type GobServerCodec struct {
 	closed bool
 }
 
-func (cc *GobServerCodec) ReadResponseHead(request *header.Request) error {
+func NewGobServerCodec(conn io.ReadWriteCloser) ServerCodec {
+	buf := bufio.NewWriter(conn)
+	return &GobServerCodec{
+		conn: conn,
+		enc:  gob.NewEncoder(conn),
+		dec:  gob.NewDecoder(conn),
+		buf:  buf,
+	}
+}
+
+func (cc *GobServerCodec) ReadRequestHeader(request *header.Request) error {
 	return cc.dec.Decode(request)
 }
 

@@ -3,10 +3,19 @@ package codec
 import (
 	"bufio"
 	"encoding/gob"
-	"github.com/z-y-x233/zrpc/header"
 	"io"
 	"log"
+
+	"github.com/z-y-x233/zrpc/header"
 )
+
+type GobClientCodec struct {
+	conn   io.ReadWriteCloser
+	enc    *gob.Encoder
+	dec    *gob.Decoder
+	buf    *bufio.Writer
+	closed bool
+}
 
 func NewGobClientCodec(conn io.ReadWriteCloser) ClientCodec {
 	buf := bufio.NewWriter(conn)
@@ -18,15 +27,7 @@ func NewGobClientCodec(conn io.ReadWriteCloser) ClientCodec {
 	}
 }
 
-type GobClientCodec struct {
-	conn   io.ReadWriteCloser
-	enc    *gob.Encoder
-	dec    *gob.Decoder
-	buf    *bufio.Writer
-	closed bool
-}
-
-func (cc *GobClientCodec) ReadResponseHead(response *header.Response) error {
+func (cc *GobClientCodec) ReadResponseHeader(response *header.Response) error {
 	return cc.dec.Decode(response)
 }
 
@@ -37,7 +38,6 @@ func (cc *GobClientCodec) ReadResponseBody(body interface{}) error {
 func (cc *GobClientCodec) WriteRequest(request *header.Request, body interface{}) error {
 	if err := cc.enc.Encode(request); err != nil {
 		log.Print("rpc WriteRequest header err: ", err)
-
 		return err
 	}
 	if err := cc.enc.Encode(body); err != nil {
