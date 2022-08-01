@@ -1,9 +1,12 @@
 package zrpc
 
 import (
+	"context"
 	"log"
 	"net"
 	"testing"
+
+	"github.com/z-y-x233/zrpc/option"
 )
 
 type A struct{}
@@ -19,7 +22,7 @@ type Reply struct {
 }
 
 func (*A) Inc(args Args, reply *Reply) error {
-	reply.X = args.X + 114514
+	reply.X = 114514
 	return nil
 }
 
@@ -31,11 +34,16 @@ func TestRpc(t *testing.T) {
 	s := NewServer()
 	lis, _ := net.Listen("tcp", ":4321")
 	s.Register(new(A))
-	go s.Accept(lis)
+	s.Accept(lis)
 
-	c := NewClient()
-	c.Dial("tcp", ":4321")
+	c := Dial("tcp", "1.1.1.1:4321", option.DefaultOptions())
+	// Dial("tcp", ":4321")
 	reply := &Reply{}
-	c.Call("A.Inc", &Args{1}, reply)
-	log.Print(reply.X)
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.opt.HandleTimeout)
+	defer cancel()
+	err := c.Call(ctx, "A.Inc", &Args{1}, reply)
+	log.Print(reply.X, err)
+
+	// time.Sleep(3 * time.Second)
 }

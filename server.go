@@ -41,14 +41,16 @@ func NewServer() *Server {
 }
 
 func (server *Server) Accept(lis net.Listener) {
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			log.Print(err)
-			return
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			server.ServeConn(conn)
 		}
-		server.ServeConn(conn)
-	}
+	}()
 }
 
 func (server *Server) ServeConn(conn io.ReadWriteCloser) {
@@ -222,6 +224,8 @@ func (server *Server) register(rcvr interface{}, name string, username bool) err
 	if _, dup := server.serviceMap.LoadOrStore(sname, s); dup {
 		return errors.New("zrpc: service already defined: " + sname)
 	}
+
+	log.Printf("zrpc register service: %q", reflect.Indirect(s.rcv).Type())
 	return nil
 }
 

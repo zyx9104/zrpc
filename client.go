@@ -1,9 +1,11 @@
 package zrpc
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"sync"
@@ -19,6 +21,7 @@ type Client struct {
 	mtx     sync.Mutex
 	Seq     uint64
 	pending map[uint64]*Call
+	opt     *option.Options
 }
 
 type Call struct {
@@ -30,22 +33,55 @@ type Call struct {
 	Done          chan *Call
 }
 
-func NewClient() *Client {
-
-	return &Client{
-		pending: make(map[uint64]*Call),
+func parseOptions(opt ...*option.Options) *option.Options {
+	if len(opt) > 0 && opt[0] != nil {
+		return opt[0]
 	}
+	return option.DefaultOptions()
 }
 
-func (client *Client) Dial(network string, address string) {
-	conn, err := net.Dial(network, address)
+func newClient(conn io.ReadWriteCloser, opt *option.Options) (*Client, error) {
+
+	client := &Client{
+		pending: make(map[uint64]*Call),
+		opt:     opt,
+	}
+	err := json.NewEncoder(conn).Encode(client.opt)
+	if err != nil {
+		return nil, err
+	}
+	client.codec = codec.ClientCodecs[client.opt.CodecType](conn)
+	if client.codec == nil {
+		return nil, fmt.Errorf("codec %q not found", opt.CodecType)
+	}
+	return client, nil
+}
+
+func Dial(network string, address string, opt ...*option.Options) (client *Client) {
+	client, err := dialTimeout(network, address, opt...)
 	if err != nil {
 		log.Fatal(err)
 	}
-	opt := &option.Options{CodecType: codec.Gob}
-	json.NewEncoder(conn).Encode(opt)
-	client.codec = codec.ClientCodecs[opt.CodecType](conn)
 	go client.input()
+	return
+}
+
+func dialTimeout(network, address string, opts ...*option.Options) (client *Client, err error) {
+	opt := parseOptions(opts...)
+	var conn net.Conn
+	if opt.ConnectTimeout == 0 {
+		conn, err = net.Dial(network, address)
+	} else {
+		conn, err = net.DialTimeout(network, address, opt.ConnectTimeout)
+	}
+	if err != nil {
+		return nil, err
+	}
+	client, err = newClient(conn, opt)
+	if err != nil {
+		return nil, err
+	}
+	return
 }
 
 func (client *Client) registerCall(call *Call) {
@@ -65,9 +101,16 @@ func (client *Client) deleteCall(Seq uint64) *Call {
 	return call
 }
 
-func (client *Client) Call(serviceMethod string, args, reply interface{}) error {
-	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return errors.New(call.Error)
+func (client *Client) Call(ctx context.Context, serviceMethod string, args, reply interface{}) (err error) {
+	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	select {
+	case <-ctx.Done():
+		err = fmt.Errorf("rpc call failed: %s", ctx.Err().Error())
+	case c := <-call.Done:
+		err = errors.New(c.Error)
+	}
+
+	return
 }
 
 func (client *Client) Go(serviceMethod string, args, reply interface{}, done chan *Call) *Call {
