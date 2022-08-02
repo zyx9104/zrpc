@@ -1,7 +1,6 @@
 package zrpc
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +37,15 @@ func parseOptions(opt ...*option.Options) *option.Options {
 		return opt[0]
 	}
 	return option.DefaultOptions()
+}
+
+func NewClientWithCodec(codec codec.ClientCodec) *Client {
+	client := &Client{
+		pending: make(map[uint64]*Call),
+		codec:   codec,
+	}
+	go client.input()
+	return client
 }
 
 func newClient(conn io.ReadWriteCloser, opt *option.Options) (*Client, error) {
@@ -101,16 +109,9 @@ func (client *Client) deleteCall(Seq uint64) *Call {
 	return call
 }
 
-func (client *Client) Call(ctx context.Context, serviceMethod string, args, reply interface{}) (err error) {
-	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
-	select {
-	case <-ctx.Done():
-		err = fmt.Errorf("rpc call failed: %s", ctx.Err().Error())
-	case c := <-call.Done:
-		err = errors.New(c.Error)
-	}
-
-	return
+func (client *Client) Call(serviceMethod string, args, reply interface{}) (err error) {
+	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
+	return errors.New(call.Error)
 }
 
 func (client *Client) Go(serviceMethod string, args, reply interface{}, done chan *Call) *Call {

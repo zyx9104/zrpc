@@ -1,7 +1,6 @@
 package zrpc
 
 import (
-	"context"
 	"log"
 	"net"
 	"testing"
@@ -36,13 +35,11 @@ func TestRpc(t *testing.T) {
 	s.Register(new(A))
 	s.Accept(lis)
 
-	c := Dial("tcp", "1.1.1.1:4321", option.DefaultOptions())
+	c := Dial("tcp", ":4321", option.DefaultOptions())
 	// Dial("tcp", ":4321")
 	reply := &Reply{}
 
-	ctx, cancel := context.WithTimeout(context.Background(), c.opt.HandleTimeout)
-	defer cancel()
-	err := c.Call(ctx, "A.Inc", &Args{1}, reply)
+	err := c.Call("A.Inc", &Args{1}, reply)
 	log.Print(reply.X, err)
 
 	// time.Sleep(3 * time.Second)
