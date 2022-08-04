@@ -1,9 +1,11 @@
-package zrpc
+package zrpc_test
 
 import (
 	"log"
 	"net"
 	"testing"
+
+	"github.com/z-y-x233/zrpc"
 )
 
 type Svc struct{}
@@ -21,9 +23,8 @@ func (s *Svc) Test(arg Arg, reply *Reply) error {
 	return nil
 }
 
-func TestRpc(t *testing.T) {
-
-	s := NewServer()
+func init() {
+	s := zrpc.NewServer()
 	lis, err := net.Listen("tcp", ":9999")
 	if err != nil {
 		log.Fatal(err)
@@ -35,18 +36,16 @@ func TestRpc(t *testing.T) {
 		log.Print(err)
 	}
 	go s.Accept(lis)
-
-	conn, _ := net.Dial("tcp", ":9999")
-	c := NewClient(conn)
-	re := &Reply{}
-	c.Call("Svc.Test", Arg{11}, re)
-	log.Print(re.X)
-
-	// time.Sleep(time.Second)
 }
 
 func BenchmarkServer(b *testing.B) {
+	conn, _ := net.Dial("tcp", ":9999")
+	c := zrpc.NewClient(conn)
+	re := &Reply{}
 	for i := 0; i < b.N; i++ {
-
+		c.Call("Svc.Test", Arg{i}, re)
+		if re.X != i*i {
+			log.Fatal(re)
+		}
 	}
 }
