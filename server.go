@@ -10,16 +10,18 @@ import (
 	"sync"
 )
 
+var TypeOfError = reflect.TypeOf((*error)(nil)).Elem()
+
 type any interface{}
 
-type ServeCodec interface {
+type ServerCodec interface {
 	ReadRequestHeader(req *Request) error
 	ReadRequestBody(body any) error
 	WriteResponse(resp *Response, body any) error
 	Close() error
 }
 
-func defaultServerCodec(conn io.ReadWriteCloser) ServeCodec {
+func defaultServerCodec(conn io.ReadWriteCloser) ServerCodec {
 	return nil
 }
 
@@ -83,23 +85,31 @@ func (s *Server) ServeConn(conn io.ReadWriteCloser) {
 	s.ServeCodec(codec)
 }
 
-func (s *Server) ServeCodec(codec ServeCodec) {
-
+func (s *Server) ServeCodec(codec ServerCodec) {
+	wg := &sync.WaitGroup{}
+	sending := &sync.Mutex{}
 	for {
 		svc, mtype, req, argv, replyv, err := s.ReadRequest(codec)
 		if err != nil {
-			if err != io.EOF {
-				log.Print(err)
+			if err == io.EOF {
+				break
+			}
+			log.Print(err)
+			if req != nil {
+				s.sendResponse(codec, req, struct{}{}, err.Error(), sending)
+				s.freeRequest(req)
 			}
 			continue
 		}
-
-		go svc.call(s, mtype, req, argv, replyv)
+		wg.Add(1)
+		go svc.call(codec, s, mtype, req, argv, replyv, wg, sending)
 	}
 
+	wg.Wait()
+	codec.Close()
 }
 
-func (s *Server) ReadRequest(codec ServeCodec) (svc *service, mtype *methodType, req *Request, argv, replyv reflect.Value, err error) {
+func (s *Server) ReadRequest(codec ServerCodec) (svc *service, mtype *methodType, req *Request, argv, replyv reflect.Value, err error) {
 	svc, mtype, req, err = s.ReadRequestHeader(codec)
 	if err != nil {
 		codec.ReadRequestBody(nil)
@@ -133,7 +143,7 @@ func (s *Server) ReadRequest(codec ServeCodec) (svc *service, mtype *methodType,
 	return
 }
 
-func (s *Server) ReadRequestHeader(codec ServeCodec) (svc *service, mtype *methodType, req *Request, err error) {
+func (s *Server) ReadRequestHeader(codec ServerCodec) (svc *service, mtype *methodType, req *Request, err error) {
 	req = s.getRequest()
 	err = codec.ReadRequestHeader(req)
 	if err != nil {
@@ -162,12 +172,38 @@ func (s *Server) ReadRequestHeader(codec ServeCodec) (svc *service, mtype *metho
 
 //===============================
 
-func (s *service) call(service *Server, mtype *methodType, req *Request, argv, replyv reflect.Value) {
-	// function := mtype.method.Func
+func (s *service) call(codec ServerCodec, server *Server, mtype *methodType, req *Request, argv, replyv reflect.Value, wg *sync.WaitGroup, sending *sync.Mutex) {
+	defer wg.Done()
 
-	// args := []reflect.Value{s.rcvr, argv, replyv}
-	// returnVal := function.Call(args)
+	function := mtype.method.Func
+	args := []reflect.Value{s.rcvr, argv, replyv}
+	returnVal := function.Call(args)
 
+	mtype.Lock()
+	mtype.numCalls++
+	mtype.Unlock()
+
+	errInt := returnVal[0].Interface()
+	errmsg := errInt.(error).Error()
+	server.sendResponse(codec, req, replyv.Interface(), errmsg, sending)
+	server.freeRequest(req)
+
+}
+
+func (s *Server) sendResponse(codec ServerCodec, req *Request, reply any, errmsg string, sending *sync.Mutex) {
+	resp := s.getResponse()
+	resp.Seq = req.Seq
+	resp.ServiceMethod = req.ServiceMethod
+	resp.Error = errmsg
+
+	sending.Lock()
+	err := codec.WriteResponse(resp, reply)
+	sending.Unlock()
+
+	if err != nil {
+		log.Print("rpc.sendResponse: ", err)
+	}
+	s.freeResponse(resp)
 }
 
 func (s *Server) getRequest() *Request {
