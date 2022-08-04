@@ -1,6 +1,9 @@
 package zrpc
 
 import (
+	"bufio"
+	"encoding/gob"
+	"errors"
 	"fmt"
 	"go/token"
 	"io"
@@ -11,19 +14,19 @@ import (
 	"sync"
 )
 
-var TypeOfError = reflect.TypeOf((*error)(nil)).Elem()
+var typeOfError = reflect.TypeOf((*error)(nil)).Elem()
 
-type any interface{}
+var debugLog = true
 
 type ServerCodec interface {
 	ReadRequestHeader(req *Request) error
-	ReadRequestBody(body any) error
-	WriteResponse(resp *Response, body any) error
+	ReadRequestBody(body interface{}) error
+	WriteResponse(resp *Response, body interface{}) error
 	Close() error
 }
 
 func defaultServerCodec(conn io.ReadWriteCloser) ServerCodec {
-	return nil
+	return NewGobServerCodec(conn)
 }
 
 type Request struct {
@@ -59,14 +62,21 @@ type Server struct {
 }
 
 func NewServer() *Server {
-	return &Server{}
+	return &Server{
+		reqPool: sync.Pool{
+			New: func() interface{} { return new(Request) },
+		},
+		respPool: sync.Pool{
+			New: func() interface{} { return new(Response) },
+		},
+	}
 }
 
-func (s *Server) Register(rcvr any) error {
+func (s *Server) Register(rcvr interface{}) error {
 	return s.register(rcvr, "", false)
 }
 
-func (s *Server) RegisterName(rcvr any, name string) error {
+func (s *Server) RegisterName(rcvr interface{}, name string) error {
 	return s.register(rcvr, name, true)
 }
 
@@ -93,13 +103,13 @@ func (s *Server) ServeCodec(codec ServerCodec) {
 		svc, mtype, req, argv, replyv, err := s.ReadRequest(codec)
 		if err != nil {
 			if err == io.EOF {
+				if req != nil {
+					s.sendResponse(codec, req, struct{}{}, err.Error(), sending)
+					s.freeRequest(req)
+				}
 				break
 			}
 			log.Print(err)
-			if req != nil {
-				s.sendResponse(codec, req, struct{}{}, err.Error(), sending)
-				s.freeRequest(req)
-			}
 			continue
 		}
 		wg.Add(1)
@@ -185,13 +195,16 @@ func (s *service) call(codec ServerCodec, server *Server, mtype *methodType, req
 	mtype.Unlock()
 
 	errInt := returnVal[0].Interface()
-	errmsg := errInt.(error).Error()
+	errmsg := ""
+	if errInt != nil {
+		errmsg = errInt.(error).Error()
+	}
 	server.sendResponse(codec, req, replyv.Interface(), errmsg, sending)
 	server.freeRequest(req)
 
 }
 
-func (s *Server) register(rcvr any, uname string, username bool) error {
+func (s *Server) register(rcvr interface{}, uname string, username bool) error {
 	svc := new(service)
 	svc.rcvr = reflect.ValueOf(rcvr)
 	svc.typ = reflect.TypeOf(rcvr)
@@ -220,11 +233,17 @@ func (s *Server) register(rcvr any, uname string, username bool) error {
 
 		return err
 	}
+
+	if _, dup := s.serviceMap.LoadOrStore(sname, svc); dup {
+		return errors.New("rpc: service already defined: " + sname)
+	}
+
 	log.Printf("rpc register service %q", svc.typ)
+
 	return nil
 }
 
-func (s *Server) sendResponse(codec ServerCodec, req *Request, reply any, errmsg string, sending *sync.Mutex) {
+func (s *Server) sendResponse(codec ServerCodec, req *Request, reply interface{}, errmsg string, sending *sync.Mutex) {
 	resp := s.getResponse()
 	resp.Seq = req.Seq
 	resp.ServiceMethod = req.ServiceMethod
@@ -241,7 +260,8 @@ func (s *Server) sendResponse(codec ServerCodec, req *Request, reply any, errmsg
 }
 
 func (s *Server) getRequest() *Request {
-	return s.reqPool.Get().(*Request)
+	// return s.reqPool.Get().(*Request)
+	return &Request{}
 }
 
 func (s *Server) freeRequest(req *Request) {
@@ -250,7 +270,8 @@ func (s *Server) freeRequest(req *Request) {
 }
 
 func (s *Server) getResponse() *Response {
-	return s.respPool.Get().(*Response)
+	// return s.respPool.Get().(*Response)
+	return &Response{}
 }
 
 func (s *Server) freeResponse(resp *Response) {
@@ -311,7 +332,7 @@ func getServiceMethods(svc reflect.Type) map[string]*methodType {
 			continue
 		}
 
-		if mtype.Out(0) != TypeOfError {
+		if mtype.Out(0) != typeOfError {
 			continue
 		}
 
@@ -320,4 +341,48 @@ func getServiceMethods(svc reflect.Type) map[string]*methodType {
 	}
 
 	return methods
+}
+
+type gobServerCodec struct {
+	rwc    io.ReadWriteCloser
+	enc    *gob.Encoder
+	dec    *gob.Decoder
+	buf    *bufio.Writer
+	closed bool
+}
+
+func NewGobServerCodec(conn io.ReadWriteCloser) ServerCodec {
+	buf := bufio.NewWriter(conn)
+	return &gobServerCodec{
+		rwc: conn,
+		enc: gob.NewEncoder(buf),
+		dec: gob.NewDecoder(conn),
+		buf: buf,
+	}
+}
+
+func (cc *gobServerCodec) ReadRequestHeader(req *Request) error {
+	return cc.dec.Decode(req)
+}
+
+func (cc *gobServerCodec) ReadRequestBody(body interface{}) error {
+	return cc.dec.Decode(body)
+}
+
+func (cc *gobServerCodec) WriteResponse(resp *Response, body interface{}) error {
+	if err := cc.enc.Encode(resp); err != nil {
+		return err
+	}
+	if err := cc.enc.Encode(body); err != nil {
+		return err
+	}
+	return cc.buf.Flush()
+}
+
+func (cc *gobServerCodec) Close() error {
+	if cc.closed {
+		return nil
+	}
+	cc.closed = true
+	return cc.rwc.Close()
 }

@@ -1,6 +1,8 @@
 package zrpc
 
 import (
+	"bufio"
+	"encoding/gob"
 	"errors"
 	"io"
 	"log"
@@ -9,16 +11,16 @@ import (
 
 type ClientCodec interface {
 	ReadResponseHeader(resp *Response) error
-	ReadResponseBody(body any) error
-	WriteRequest(req *Request, body any) error
+	ReadResponseBody(body interface{}) error
+	WriteRequest(req *Request, body interface{}) error
 	Close() error
 }
 
 type Call struct {
 	ServiceMethod string
 	Seq           uint64
-	Args          any
-	Reply         any
+	Args          interface{}
+	Reply         interface{}
 	Error         error
 	Done          chan *Call
 }
@@ -27,7 +29,7 @@ type Client struct {
 	codec ClientCodec
 
 	reqMutex sync.Mutex // protects following
-	request  *Request
+	request  Request
 
 	mutex    sync.Mutex // protects following
 	seq      uint64
@@ -37,7 +39,7 @@ type Client struct {
 }
 
 func defaultClientCodec(conn io.ReadWriteCloser) ClientCodec {
-	return nil
+	return NewGobClientCodec(conn)
 }
 
 func NewClient(conn io.ReadWriteCloser) *Client {
@@ -60,11 +62,12 @@ func NewClientWithCodec(codec ClientCodec) *Client {
 	return c
 }
 
-func (c *Client) Call(serviceMethod string, argv, reply any) error {
-	return (<-c.Go(serviceMethod, argv, reply, make(chan *Call, 1)).Done).Error
+func (c *Client) Call(serviceMethod string, argv, reply interface{}) error {
+	call := <-c.Go(serviceMethod, argv, reply, make(chan *Call, 1)).Done
+	return call.Error
 }
 
-func (c *Client) Go(serviceMethod string, argv, reply any, done chan *Call) *Call {
+func (c *Client) Go(serviceMethod string, argv, reply interface{}, done chan *Call) *Call {
 	if done == nil {
 		done = make(chan *Call, 10)
 	}
@@ -74,12 +77,6 @@ func (c *Client) Go(serviceMethod string, argv, reply any, done chan *Call) *Cal
 		Reply:         reply,
 		Done:          done,
 	}
-
-	c.mutex.Lock()
-	c.seq++
-	call.Seq = c.seq
-	c.pending[call.Seq] = call
-	c.mutex.Unlock()
 
 	go c.send(call)
 	return call
@@ -129,7 +126,6 @@ func (c *Client) input() {
 func (c *Client) send(call *Call) {
 	c.reqMutex.Lock()
 	defer c.reqMutex.Unlock()
-
 	// Register this call.
 	c.mutex.Lock()
 	if c.shutdown || c.closing {
@@ -146,7 +142,8 @@ func (c *Client) send(call *Call) {
 	// Encode and send the request.
 	c.request.Seq = seq
 	c.request.ServiceMethod = call.ServiceMethod
-	err := c.codec.WriteRequest(c.request, call.Args)
+	err := c.codec.WriteRequest(&c.request, call.Args)
+
 	if err != nil {
 		c.mutex.Lock()
 		call = c.pending[seq]
@@ -161,4 +158,40 @@ func (c *Client) send(call *Call) {
 
 func (c *Call) done() {
 	c.Done <- c
+}
+
+type gobClientCodec struct {
+	rwc io.ReadWriteCloser
+	enc *gob.Encoder
+	dec *gob.Decoder
+	buf *bufio.Writer
+}
+
+func NewGobClientCodec(conn io.ReadWriteCloser) *gobClientCodec {
+	buf := bufio.NewWriter(conn)
+	return &gobClientCodec{
+		rwc: conn,
+		enc: gob.NewEncoder(buf),
+		dec: gob.NewDecoder(conn),
+		buf: buf,
+	}
+}
+
+func (cc *gobClientCodec) ReadResponseHeader(resp *Response) error {
+	return cc.dec.Decode(resp)
+}
+
+func (cc *gobClientCodec) ReadResponseBody(body interface{}) error {
+	return cc.dec.Decode(body)
+}
+
+func (cc *gobClientCodec) WriteRequest(req *Request, args interface{}) error {
+
+	cc.enc.Encode(req)
+	cc.enc.Encode(args)
+	return cc.buf.Flush()
+}
+
+func (cc *gobClientCodec) Close() error {
+	return cc.rwc.Close()
 }
