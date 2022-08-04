@@ -2,6 +2,7 @@ package zrpc
 
 import (
 	"fmt"
+	"go/token"
 	"io"
 	"log"
 	"net"
@@ -62,11 +63,11 @@ func NewServer() *Server {
 }
 
 func (s *Server) Register(rcvr any) error {
-	return nil
+	return s.register(rcvr, "", false)
 }
 
 func (s *Server) RegisterName(rcvr any, name string) error {
-	return nil
+	return s.register(rcvr, name, true)
 }
 
 func (s *Server) Accept(lis net.Listener) {
@@ -190,6 +191,39 @@ func (s *service) call(codec ServerCodec, server *Server, mtype *methodType, req
 
 }
 
+func (s *Server) register(rcvr any, uname string, username bool) error {
+	svc := new(service)
+	svc.rcvr = reflect.ValueOf(rcvr)
+	svc.typ = reflect.TypeOf(rcvr)
+	sname := reflect.Indirect(svc.rcvr).Type().Name()
+
+	if username {
+		sname = uname
+	}
+	if !token.IsExported(sname) || sname == "" {
+		err := fmt.Errorf("rpc register: service %q must have exported name", svc.typ)
+		return err
+	}
+	svc.name = sname
+
+	svc.method = getServiceMethods(svc.typ)
+
+	if len(svc.method) == 0 {
+		m := getServiceMethods(reflect.PointerTo(svc.typ))
+		if len(m) != 0 {
+			err := fmt.Errorf("rpc register: service %q should pass by pointer", svc.typ)
+			log.Print(err)
+			return err
+		}
+		err := fmt.Errorf("rpc register: service %q has no suitable method", svc.typ)
+		log.Print(err)
+
+		return err
+	}
+	log.Printf("rpc register service %q", svc.typ)
+	return nil
+}
+
 func (s *Server) sendResponse(codec ServerCodec, req *Request, reply any, errmsg string, sending *sync.Mutex) {
 	resp := s.getResponse()
 	resp.Seq = req.Seq
@@ -235,4 +269,55 @@ func (resp *Response) reset() {
 	resp.Seq = 0
 	resp.ServiceMethod = ""
 	resp.Error = ""
+}
+
+func isExportedOrBuiltinType(t reflect.Type) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return token.IsExported(t.Name()) || t.PkgPath() == ""
+}
+
+func getServiceMethods(svc reflect.Type) map[string]*methodType {
+	methods := make(map[string]*methodType)
+
+	for i := 0; i < svc.NumMethod(); i++ {
+		method := svc.Method(i)
+		mtype := method.Type
+		if !method.IsExported() {
+			continue
+		}
+
+		if mtype.NumIn() != 3 {
+			continue
+		}
+		argType := mtype.In(1)
+
+		if !isExportedOrBuiltinType(argType) {
+			continue
+		}
+
+		replyType := mtype.In(2)
+
+		if replyType.Kind() != reflect.Pointer {
+			continue
+		}
+
+		if !isExportedOrBuiltinType(argType) {
+			continue
+		}
+
+		if mtype.NumOut() != 1 {
+			continue
+		}
+
+		if mtype.Out(0) != TypeOfError {
+			continue
+		}
+
+		methods[method.Name] = &methodType{method: method, argType: argType, replyType: replyType}
+
+	}
+
+	return methods
 }
